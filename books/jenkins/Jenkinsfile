@@ -1,77 +1,79 @@
 pipeline {
     options {
         // set a timeout of 60 minutes for this pipeline
-        timeout(time: 60, unit: 'MINUTES')
+        timeout(time: 60, unit: 'minutes')
     }
     agent {
       node {
-        //TODO: Add label for Node.js jenkins agent
+	label 'nodejs'
       }
     }
 
     environment {
-        //TODO: Edit these vars as per your env
-        DEV_PROJECT = "youruser-books-dev"
-        STAGE_PROJECT = "youruser-books-stage"
-        APP_GIT_URL = "https://github.com/youruser/DO288-apps"
-        NEXUS_SERVER = "http://nexus-common.apps.cluster.domain.example.com/repository/nodejs"
+        dev_project = "mustonenn-books-dev"
+        stage_project = "mustonenn-books-stage"
+        app_git_url = "https://github.com/mustonenn/do288-apps"
+        nexus_server = "nexus-common.apps.eu45.prod.nextcle.com/repository/nodejs"
 
-        // DO NOT CHANGE THE GLOBAL VARS BELOW THIS LINE
-        APP_NAME = "books"
+        // do not change the global vars below this line
+        app_name = "books"
     }
 
 
     stages {
 
-        stage('NPM Install') {
+        stage('npm install') {
             steps {
-                echo '### Installing NPM dependencies ###'
+                echo '### installing npm dependencies ###'
                 sh '''
-                        npm config set registry ${NEXUS_SERVER}
+                        npm config set registry ${nexus_server}
                         cd books
                         npm install
                    '''
             }
         }
 
-        stage('Run Unit Tests') {
+        stage('run unit tests') {
             steps {
-                echo '### Running unit tests ###'
+                echo '### running unit tests ###'
                 sh 'cd books; npm test'
             }
         }
 
-        stage('Run Linting Tools') {
+        stage('run linting tools') {
             steps {
-                echo '### Running eslint on code ###'
+                echo '### running eslint on code ###'
                 sh 'cd books; npm run lint'
             }
         }
 
-        stage('Launch new app in DEV env') {
+        stage('launch new app in dev env') {
             steps {
-                echo '### Cleaning existing resources in DEV env ###'
+                echo '### cleaning existing resources in dev env ###'
                 sh '''
-                        oc project ${DEV_PROJECT}
-                        oc delete all -l app=${APP_NAME}
+                        oc project ${dev_project}
+                        oc delete all -l app=${app_name}
                         sleep 5
                    '''
 
-                echo '### Creating a new app in DEV env ###'
-                //TODO: Create a new app and expose the service
+                echo '### creating a new app in dev env ###'
+		sh '''
+			oc project ${DEV_PROJECT}
+			oc new-app --as-deployment-config --name books nodejs:12~${APP_GIT_URL} --build-env npm_config_registry=${NEXUS_SERVER} --context-dir ${APP_NAME}
+			oc expose svc/${APP_NAME}
             }
         }
 
-        stage('Wait for S2I build to complete') {
+        stage('wait for s2i build to complete') {
             steps {
                 script {
-                    openshift.withCluster() {
-                        openshift.withProject( "${DEV_PROJECT}" ) {
-                            def bc = openshift.selector("bc", "${APP_NAME}")
+                    openshift.withcluster() {
+                        openshift.withproject( "${dev_project}" ) {
+                            def bc = openshift.selector("bc", "${app_name}")
                             bc.logs('-f')
                             def builds = bc.related('builds')
-                            builds.untilEach(1) {
-                                return (it.object().status.phase == "Complete")
+                            builds.untileach(1) {
+                                return (it.object().status.phase == "complete")
                             }
                         }
                     }
@@ -79,14 +81,14 @@ pipeline {
             }
         }
 
-        stage('Wait for deployment in DEV env') {
+        stage('wait for deployment in dev env') {
             steps {
                 script {
-                    openshift.withCluster() {
-                        openshift.withProject( "${DEV_PROJECT}" ) {
-                            def deployment = openshift.selector("dc", "${APP_NAME}").rollout()
-                            openshift.selector("dc", "${APP_NAME}").related('pods').untilEach(1) {
-                                return (it.object().status.phase == "Running")
+                    openshift.withcluster() {
+                        openshift.withproject( "${dev_project}" ) {
+                            def deployment = openshift.selector("dc", "${app_name}").rollout()
+                            openshift.selector("dc", "${app_name}").related('pods').untileach(1) {
+                                return (it.object().status.phase == "running")
                             }
                         }
                     }
@@ -94,40 +96,52 @@ pipeline {
             }
         }
 
-        stage('Promote to Staging Env') {
+        stage('promote to staging env') {
             steps {
-                timeout(time: 60, unit: 'MINUTES') {
-                    input message: "Promote to Staging?"
+                timeout(time: 60, unit: 'minutes') {
+                    input message: "promote to staging?"
                 }
-                //TODO: Tag the books:latest image stream as books:stage
+		script {
+			openshift.withCluster() {
+			openshift.tag("${DEV_PROJECT}/books:latest", "${STAGE_PROJECT}/books:stage")
+			}
+		}
             }
         }
 
-        stage('Deploy to Staging Env') {
+        stage('deploy to staging env') {
             steps {
-                echo '### Cleaning existing resources in Staging ###'
+                echo '### cleaning existing resources in staging ###'
                 sh '''
-                        oc project ${STAGE_PROJECT}
-                        oc delete all -l app=${APP_NAME}
+                        oc project ${stage_project}
+                        oc delete all -l app=${app_name}
                         sleep 5
                    '''
 
-                echo '### Creating a new app in Staging ###'
-                //TODO: Create a new app in stage using the books:stage image stream and expose the service
+                echo '### creating a new app in staging ###'
+		sh '''
+			oc project ${STAGE_PROJECT}
+			oc new-app --as-deployment-config --name books -i books:stage
+			oc expose svc/${APP_NAME}
             }
         }
 
-        stage('Wait for deployment in Staging') {
+        stage('wait for deployment in staging') {
             steps {
-                sh "oc get route ${APP_NAME} -n ${STAGE_PROJECT} -o jsonpath='{ .spec.host }' --loglevel=4 > routehost"
+                sh "oc get route ${app_name} -n ${stage_project} -o jsonpath='{ .spec.host }' --loglevel=4 > routehost"
 
                 script {
-                    routeHost = readFile('routehost').trim()
+                    routehost = readfile('routehost').trim()
 
-                    openshift.withCluster() {
-                        //TODO: Watch deployment until pod is in 'Running' state
+                    openshift.withcluster() {
+			openshift.withProject( "${STAGE_PROJECT}" ) {
+				def deployment = openshift.selector("dc", "${APP_NAME}").rollout()
+				openshift.selector("dc", "${APP_NAME}").related('pods').untilEach(1) {
+					return (it.object().status.phase == "Running")
+				}
+			}
 
-                        echo "Deployment to Staging env is complete. Access the app at the URL http://${routeHost}."
+                        echo "deployment to staging env is complete. access the app at the url http://${routehost}."
                     }
                 }
             }
